@@ -15,6 +15,7 @@ Resources:
   Table:
     Type: AWS::DynamoDB::Table
     Properties:
+      BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: email
           AttributeType: S
@@ -27,9 +28,6 @@ Resources:
           KeyType: HASH
         - AttributeName: timestamp
           KeyType: RANGE
-      ProvisionedThroughput:
-        ReadCapacityUnits: 2
-        WriteCapacityUnits: 2
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES
       LocalSecondaryIndexes:
