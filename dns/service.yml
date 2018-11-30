@@ -1,0 +1,276 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: "[DNS] Service Deployment"
+
+Parameters:
+
+  MasterRegion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/Global/MasterRegion"
+    Description: |
+      Retrieves the MasterRegion from the AWS SSM Parameter Store
+
+  DomainName:
+    Type: String
+    Description: Domain to setup, such as example.com
+
+  MailFrom:
+    Type: String
+    Default: mail
+    Description: The name of the mail from domain
+
+Conditions:
+
+  IsSESRegion: !Equals [ !Ref "AWS::Region", "us-east-1" ]
+
+  IsCloudFrontRegion: !Equals [ !Ref "AWS::Region", "us-east-1" ]
+
+  IsMasterRegion: !Equals [ !Ref "AWS::Region", !Ref "MasterRegion" ]
+
+  IsSlaveRegion: !Not [ !Condition IsMasterRegion ]
+
+Resources:
+
+  MasterRegionImports:
+    Condition: IsSlaveRegion
+    Type: Custom::GlobalImports
+    Properties:
+      ServiceToken: !ImportValue GlobalImportValue
+      SourceRegion: !ImportValue MasterRegion
+      Exports:
+        - 'DomainId'
+
+  Zone:
+    Condition: IsMasterRegion
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub "Primary domain for ${DomainName}"
+
+  Namespace:
+    Condition: IsMasterRegion
+    DependsOn: Zone
+    Type: AWS::ServiceDiscovery::PublicDnsNamespace
+    Properties:
+      Name: !Ref DomainName
+
+  CAARecord:
+    Condition: IsMasterRegion
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref Zone
+      RecordSets:
+        - Name: !Sub "${DomainName}."
+          Type: CAA
+          TTL: "86400"
+          ResourceRecords:
+            - '0 issue "amazontrust.com;"'
+            - '0 issue "awstrust.com;"'
+            - '0 issue "amazonaws.com;"'
+            - '0 issuewild "amazon.com;"'
+            - '0 issuewild "amazontrust.com;"'
+            - '0 issuewild "awstrust.com;"'
+            - '0 issuewild "amazonaws.com;"'
+
+  SPFDomainRecords:
+    Condition: IsSESRegion
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !If 
+        - IsMasterRegion
+        - !Ref Zone
+        - !GetAtt MasterRegionImports.DomainId
+      RecordSets:
+        - Name: !Sub "${MailFrom}.${DomainName}"
+          Type: MX
+          TTL: "300"
+          ResourceRecords:
+            - !Sub "10 feedback-smtp.${AWS::Region}.amazonses.com"
+        - Name: !Sub "${MailFrom}.${DomainName}."
+          Type: TXT
+          TTL: "300"
+          ResourceRecords:
+            - '"v=spf1 include:amazonses.com ~all"'
+        - Name: !Sub "_dmarc.${DomainName}."
+          Type: TXT
+          TTL: "300"
+          ResourceRecords:
+            - !Sub '"v=DMARC1; p=none; rua=mailto:webmaster@${DomainName};"'
+
+  DomainCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames:
+        - !Sub "*.${DomainName}"
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          ValidationDomain: !Ref DomainName
+      ValidationMethod: DNS
+
+  DomainCertificateValidation:
+    Condition: IsMasterRegion
+    Type: Custom::GlobalImports
+    Properties:
+      ServiceToken: !GetAtt DomainCertificateValidationFunction.Arn
+      DomainName: !Ref DomainName
+
+  DomainCertificateValidationRecord:
+    Condition: IsMasterRegion
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref Zone
+      RecordSets:
+        - Name: !GetAtt DomainCertificateValidation.Name
+          Type: !GetAtt DomainCertificateValidation.Type
+          TTL: "86400"
+          ResourceRecords:
+            - !GetAtt DomainCertificateValidation.Value
+
+  DomainCertificateValidationFunction:
+    Condition: IsMasterRegion
+    Type: AWS::Lambda::Function
+    Properties:
+      Timeout: 500
+      Handler: index.handler
+      Role: !GetAtt DomainCertificateValidationFunctionExecutionRole.Arn
+      Runtime: nodejs6.10
+      Code:
+        ZipFile: |
+          const response = require("cfn-response");
+          const AWS = require("aws-sdk");
+          const { AWS_REGION } = process.env;
+          const filters = { CertificateStatuses: ['PENDING_VALIDATION', 'ISSUED'] };
+          exports.handler = (event, context) => {
+            const { DomainName, Timeout = 120, Interval = 30 } = event.ResourceProperties;
+            const acm = new AWS.ACM({ region: AWS_REGION });
+            if (event.RequestType == 'Delete') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            try {
+              setInterval(() => {
+                acm.listCertificates(filters, (err, { CertificateSummaryList: list }) => {
+                  if (err) {
+                    throw err;
+                  } else {
+                    const match = list.filter(({ DomainName: name }) => DomainName === name);
+                    if (match.length > 0) {
+                      const [{ CertificateArn }] = match;
+                      acm.describeCertificate({ CertificateArn }, (err, { Certificate }) => {
+                        if (err) {
+                          throw err;
+                        } else {
+                          const { DomainValidationOptions: [{ ResourceRecord }] } = Certificate;
+                          response.send(event, context, response.SUCCESS, ResourceRecord, CertificateArn);
+                        }
+                      });
+                    }
+                  }
+                });
+              }, Interval * 1000);
+              setTimeout(() => {
+                throw new Error(`Error retrieving DNS records for "${DomainName}"`);
+              }, Timeout * 1000);
+            } catch (err) {
+              console.error(err.message);
+              response.send(event, context, response.FAILED, { Error: err.message}, DomainName);
+            }
+          };
+
+  DomainCertificateValidationFunctionLogGroup:
+    Condition: IsMasterRegion
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DomainCertificateValidationFunction}"
+      RetentionInDays: 1
+
+  DomainCertificateValidationFunctionExecutionRole:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: AssumedExecutionRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - "acm:DescribeCertificate"
+                  - "acm:ListCertificates"
+                Effect: Allow
+                Resource:
+                  - "*"
+
+  ApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Sub "api.${DomainName}"
+      RegionalCertificateArn: !Ref DomainCertificate
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiDomainRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !If 
+        - IsMasterRegion
+        - !Ref Zone
+        - !GetAtt MasterRegionImports.DomainId
+      RecordSets:
+        - SetIdentifier: !Sub "A@${AWS::Region}@api.${DomainName}"
+          Name: !Sub "api.${DomainName}"
+          Region: !Ref AWS::Region
+          Type: A
+          AliasTarget:
+            EvaluateTargetHealth: true
+            HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
+            DNSName: !GetAtt ApiDomainName.RegionalDomainName
+
+Outputs:
+
+  DomainName:
+    Condition: IsMasterRegion
+    Description: Hosted Zone Name
+    Value: !Ref DomainName
+    Export:
+      Name: DomainName
+
+  NamespaceId:
+    Condition: IsMasterRegion
+    Description: Public DNS Namespace Id
+    Value: !Ref Namespace
+    Export:
+      Name: NamespaceId
+
+  DomainId:
+    Condition: IsMasterRegion
+    Description: Hosted Zone Id
+    Value: !Ref Zone
+    Export:
+      Name: DomainId
+
+  DomainCertificate:
+    Description: ACM Arn for TLD, Regional & Wildcard Certificate
+    Value: !Ref DomainCertificate
+    Export:
+      Name: DomainCertificate
+
+  CloudFrontCertificate:
+    Condition: IsCloudFrontRegion
+    Description: ACM Arn for CloudFront HTTPS Certificate
+    Value: !Ref DomainCertificate
+    Export:
+      Name: CloudFrontCertificate

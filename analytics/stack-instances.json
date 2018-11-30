@@ -1,0 +1,6 @@
+{
+    "StackSetName": "analytics",
+    "Regions": [
+        "us-east-1"
+    ]
+}

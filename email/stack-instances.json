@@ -1,0 +1,6 @@
+{
+    "StackSetName": "email",
+    "Regions": [
+        "us-east-1"
+    ]
+}

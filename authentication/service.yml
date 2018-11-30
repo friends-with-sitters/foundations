@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "[Authentication] Service deployment"
+
+Parameters:
+
+  ReplyToUsername:
+    Type: String
+    Default: no-reply
+    Description: |
+      Username excluding the @domain suffix
+
+  EmailSubject:
+    Type: String
+    Default: "Your temporary password"
+      
+  EmailMessage:
+    Type: String
+    Default: "Your username is {username} and temporary password is {####}."
+
+  EmailIdentityArn:
+    Type: String
+    Description: The ARN of the SES Sending identity for email
+      
+  SMSMessage:
+    Type: String
+    Default: "Your username is {username} and temporary password is {####}."
+      
+  EmailVerificationMessage:
+    Type: String
+    Default: "Your verification code is {####}."
+      
+  EmailVerificationSubject:
+    Type: String
+    Default: "Your verification code"
+      
+  SmsAuthenticationMessage:
+    Type: String
+    Default: "Your authentication code is {####}."
+      
+  SmsVerificationMessage:
+    Type: String
+    Default: "Your verification code is {####}."
+      
+Resources:
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      MfaConfiguration: 'ON'
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: phone_number
+          Required: true
+          Mutable: true
+        - Name: family_name
+          Required: true
+          Mutable: true
+        - Name: name
+          Required: true
+          Mutable: true
+      UsernameAttributes:
+        - phone_number
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageTemplate:
+          EmailSubject: !Ref EmailSubject
+          EmailMessage: !Ref EmailMessage
+          SMSMessage: !Ref SMSMessage
+      EmailVerificationMessage: !Ref EmailVerificationMessage
+      EmailVerificationSubject: !Ref EmailVerificationSubject
+      SmsAuthenticationMessage: !Ref SmsAuthenticationMessage
+      SmsVerificationMessage:  !Ref SmsVerificationMessage
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: true
+        DeviceOnlyRememberedOnUserPrompt: true
+      EmailConfiguration:
+        SourceArn: !Ref EmailIdentityArn
+        ReplyToEmailAddress: !Sub
+          - "${ReplyToUsername}@${Domain}"
+          - Domain: !ImportValue DomainName
+      SmsConfiguration: 
+        SnsCallerArn: !GetAtt SMSRole.Arn
+        ExternalId:
+          Fn::Base64: !Ref AWS::StackId
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool 
+
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties: 
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId:  !Ref UserPoolClient
+          ProviderName: !Sub "cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"    
+  
+  IdentityPoolRoleMap:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties: 
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt AuthenticatedRole.Arn
+        unauthenticated: !GetAtt UnauthenticatedRole.Arn
+
+  AuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Federated: cognito-identity.amazonaws.com
+          Action: sts:AssumeRoleWithWebIdentity
+          Condition:
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr: authenticated
+
+  UnauthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Federated: cognito-identity.amazonaws.com
+          Action: sts:AssumeRoleWithWebIdentity
+          Condition:
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr: unauthenticated
+
+  SMSRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Sid: ""
+            Effect: "Allow"
+            Principal: 
+              Service: "cognito-idp.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+            Condition: 
+              StringEquals:
+                sts:ExternalId:
+                  Fn::Base64: !Ref AWS::StackId
+      Policies: 
+        - PolicyName: SMSPermissions
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: "Allow"
+                Action: 
+                  - "sns:Publish"
+                Resource: "*"
+
+Outputs:
+
+  UserPoolId:
+    Description: User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: UserPoolId
+  
+  UserPoolClient:
+    Description: User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: UserPoolClient
+
+  IdentityPoolId:
+    Description: Identity Pool ID
+    Value: !Ref IdentityPool
+    Export:
+      Name: IdentityPoolId
+
+  AuthenticatedRole:
+    Description: Authenticated IAM Role
+    Value: !Ref AuthenticatedRole
+    Export:
+      Name: AuthenticatedRole
+
+  UnauthenticatedRole:
+    Description: Unauthenticated IAM Role
+    Value: !Ref UnauthenticatedRole
+    Export:
+      Name: UnauthenticatedRole

@@ -1,0 +1,17 @@
+{
+    "StackSetName": "dns", 
+    "Description": "DNS and Web Configuration",
+    "Parameters": [
+        {
+            "ParameterKey": "DomainName",
+            "ParameterValue": "friendswithsitters.com"
+        },
+        {
+            "ParameterKey": "MailFrom",
+            "ParameterValue": "mail"
+        }
+    ],
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

@@ -1,0 +1,7 @@
+{
+    "StackSetName": "analytics", 
+    "Description": "Pinpoint Analytics",
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

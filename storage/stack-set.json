@@ -1,0 +1,17 @@
+{
+    "StackSetName": "storage",
+    "Description": "User Storage Service",
+    "Parameters": [
+        {
+            "ParameterKey": "UnauthenticatedPermissions",
+            "ParameterValue": "rw"
+        },
+        {
+            "ParameterKey": "AuthenticatedPermissions",
+            "ParameterValue": "rw"
+        }
+    ],
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

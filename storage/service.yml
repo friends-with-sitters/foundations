@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: "[Storage] User Storage"
+
+Parameters:
+
+  UnauthenticatedPermissions:
+    Type: String
+
+  AuthenticatedPermissions:
+    Type: String
+
+Conditions:
+
+  EnableUnauthReadWrite: !Equals [ !Ref UnauthenticatedPermissions, "rw" ]
+
+  EnableUnauthRead: !Equals [ !Ref UnauthenticatedPermissions, "r" ]
+
+  EnableUnauthWrite: !Equals [ !Ref UnauthenticatedPermissions, "w" ]
+
+  EnableAuthReadWrite: !Equals [ !Ref AuthenticatedPermissions, "rw" ]
+
+  EnableAuthRead: !Equals [ !Ref AuthenticatedPermissions, "r" ]
+
+  EnableAuthWrite: !Equals [ !Ref AuthenticatedPermissions, "w" ]
+
+Resources:
+
+  MasterRegion:
+    Type: Custom::GlobalImports
+    Properties:
+      ServiceToken: !ImportValue GlobalImportValue
+      SourceRegion: !ImportValue MasterRegion
+      Exports:
+        - 'AuthenticatedRole'
+        - 'UnauthenticatedRole'
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - Id: StorageRule
+            AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - HEAD
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - x-amz-server-side-encryption
+              - x-amz-request-id
+              - x-amz-id-2
+            MaxAge: '3000'
+
+  UnauthenticatedReadWritePolicy:
+    Condition: EnableUnauthReadWrite
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: UnauthenticatedReadWritePolicy
+      Roles:
+        - !GetAtt MasterRegion.UnauthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/uploads/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - public/
+                  - public/*
+                  - protected/
+                  - protected/*
+
+  UnauthenticatedReadPolicy:
+    Condition: EnableUnauthRead
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: UnauthenticatedReadPolicy
+      Roles:
+        - !GetAtt MasterRegion.UnauthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - public/
+                  - public/*
+                  - protected/
+                  - protected/*
+          - Effect: Allow
+            Action:
+             - s3:GetObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+
+  UnauthenticatedWritePolicy:
+    Condition: EnableUnauthWrite
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: UnauthenticatedWritePolicy
+      Roles:
+        - !GetAtt MasterRegion.UnauthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/uploads/*"
+    
+  AuthenticatedReadWritePolicy:
+    Condition: EnableAuthReadWrite
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AuthenticatedReadWritePolicy
+      Roles:
+        - !GetAtt MasterRegion.AuthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/${!cognito-identity.amazonaws.com:sub}/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/private/${!cognito-identity.amazonaws.com:sub}/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/uploads/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - public/
+                  - public/*
+                  - protected/
+                  - protected/*
+                  - private/${cognito-identity.amazonaws.com:sub}/
+                  - private/${cognito-identity.amazonaws.com:sub}/*
+    
+  AuthenticatedReadPolicy:
+    Condition: EnableAuthRead
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AuthenticatedReadPolicy
+      Roles:
+        - !GetAtt MasterRegion.AuthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - public/
+                  - public/*
+                  - protected/
+                  - protected/*
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/*"
+  
+  AuthenticatedWritePolicy:
+    Condition: EnableAuthWrite
+    DependsOn:
+      - Bucket
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AuthenticatedWritePolicy
+      Roles:
+        - !GetAtt MasterRegion.AuthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/public/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/private/${!cognito-identity.amazonaws.com:sub}/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/${!cognito-identity.amazonaws.com:sub}/*"
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/uploads/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/protected/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - public/
+                  - public/*
+                  - protected/
+                  - protected/*
+                  - private/${cognito-identity.amazonaws.com:sub}/
+                  - private/${cognito-identity.amazonaws.com:sub}/*
+
+Outputs:
+
+  StorageBucket:
+    Description: Name of the user storage bucket
+    Value: !Ref Bucket
+    Export:
+      Name: StorageBucket

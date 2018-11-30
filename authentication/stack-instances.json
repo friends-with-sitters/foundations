@@ -1,0 +1,6 @@
+{
+    "StackSetName": "authentication",
+    "Regions": [
+        "eu-west-2"
+    ]
+}

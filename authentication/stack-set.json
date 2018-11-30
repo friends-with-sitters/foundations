@@ -1,0 +1,13 @@
+{
+    "StackSetName": "authentication", 
+    "Description": "Cognito Authentication",
+    "Parameters": [
+        {
+            "ParameterKey": "EmailIdentityArn",
+            "ParameterValue": "arn:aws:ses:us-east-1:456195871243:identity/no-reply@friendswithsitters.com"
+        }
+    ],
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

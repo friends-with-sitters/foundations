@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "[Email] Service deployment"
+
+Parameters:
+
+  ReplyToUsername:
+    Type: String
+    Default: no-reply
+    Description: |
+      Username excluding the @domain suffix
+
+Resources:
+
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: event
+          AttributeType: S
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 2
+        WriteCapacityUnits: 2
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      LocalSecondaryIndexes:
+        - IndexName: LSI_EmailWithEvent
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+            - AttributeName: event
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - data
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+
+  EventDestinatonBucket:
+    Type: AWS::S3::Bucket
+
+  EventFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt EventDestinatonBucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 5
+        Prefix: 'YYYY/MM/DD/HH/'
+        RoleARN: !GetAtt EventFirehoseDestinationRole.Arn
+        CompressionFormat: GZIP
+
+  EventFirehoseDestinationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: !Sub "firehose.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref AWS::AccountId
+
+  EventFirehoseDestinationPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaPermissions
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:PutObject
+            Resource:
+              - !GetAtt EventDestinatonBucket.Arn
+              - !Sub "${EventDestinatonBucket.Arn}/*"
+      Roles:
+        - !Ref EventFirehoseDestinationRole
+
+  PromotionalConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: promotional
+
+  PromotionalConfigurationSetEventDestination:
+    DependsOn:
+      - SESEventDestinationPolicy
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref PromotionalConfigurationSet
+      EventDestination:
+        Name: Metrics
+        Enabled: true
+        KinesisFirehoseDestination:
+          IAMRoleARN: !GetAtt SESEventDestinationRole.Arn
+          DeliveryStreamARN: !GetAtt EventFirehose.Arn
+        MatchingEventTypes:
+          - send
+          - reject
+          - bounce
+          - complaint
+          - delivery
+          - open
+          - click
+
+  TransactionalConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: transactional
+
+  TransactionalConfigurationSetEventDestination:
+    DependsOn:
+      - SESEventDestinationPolicy
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref TransactionalConfigurationSet
+      EventDestination:
+        Name: Metrics
+        Enabled: true
+        KinesisFirehoseDestination:
+          IAMRoleARN: !GetAtt SESEventDestinationRole.Arn
+          DeliveryStreamARN: !GetAtt EventFirehose.Arn
+        MatchingEventTypes:
+          - send
+          - reject
+          - bounce
+          - complaint
+          - delivery
+          - open
+          - click
+
+  SESEventDestinationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: !Sub "ses.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref AWS::AccountId
+
+  SESEventDestinationPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaPermissions
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - firehose:PutRecordBatch
+            Resource:
+              - !GetAtt EventFirehose.Arn
+      Roles:
+        - !Ref SESEventDestinationRole
+
+  EventReceivedFunction:
+    DependsOn:
+      - EventReceivedFunctionExecutionPolicy
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const DynamoDB = require('aws-sdk/clients/dynamodb');
+          const { AWS_REGION, SENT_TABLE } = process.env;
+          const service = new DynamoDB({ region: AWS_REGION });
+          const client = new DynamoDB.DocumentClient({ service });
+          const storeEvent = ({ eventType: event, mail: { timestamp, destination: [email] } }) => {
+            const item = { event, timestamp, email, data };
+            return client.put({ TableName: SENT_TABLE, Item: item }).promise();
+          }
+          exports.handler = ({ Records: records }, context, cb) => {
+            const events = records.map(({ Sns: { Message } }) => JSON.parse(Message));
+            Promise.all(events.map(storeEvent)).then(() => cb(null, true)).catch(cb);
+          };
+      Role: !GetAtt EventReceivedFunctionExecutionRole.Arn
+
+  EventReceivedFunctionEventSource:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Region: !Ref AWS::Region
+      TopicArn: !Ref NotificationTopic
+      Endpoint: !GetAtt EventReceivedFunction.Arn
+      Protocol: lambda
+
+  EventReceivedFunctionEventSourcePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EventReceivedFunction.Arn
+      SourceArn: !Ref NotificationTopic
+      Action: 'lambda:InvokeFunction'
+      Principal: sns.amazonaws.com
+      
+  EventReceivedFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${EventReceivedFunction}"
+      RetentionInDays: 1
+
+  EventReceivedFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+
+  EventReceivedFunctionExecutionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaPermissions
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:PutItem
+            Resource:
+              - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Table}"
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - '*'
+      Roles:
+        - !Ref EventReceivedFunctionExecutionRole
+
+  SourceReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+
+  SourceReceiptRuleSetPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: SESPermissionsTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "ses.${AWS::URLSuffix}"
+            Action: sns:Publish
+            Resource: "*"
+            Condition:
+              StringEquals:
+                AWS:Referer: !Ref AWS::AccountId
+      Topics:
+        - !Ref NotificationTopic
+      
+  SourceReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    Properties:
+      RuleSetName: !Ref SourceReceiptRuleSet
+      Rule:
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Require
+        Recipients:
+          - !Sub
+            - "${ReplyToUsername}@${Domain}"
+            - Domain: !ImportValue DomainName
+        Actions:
+          - BounceAction:
+              Sender: !Sub
+                - "${ReplyToUsername}@${Domain}"
+                - Domain: !ImportValue DomainName
+              Message: This mailbox is not monitored.
+              SmtpReplyCode: 450
+          - SNSAction:
+              Encoding: Base64
+              TopicArn: !Ref NotificationTopic
+
+Outputs:
+
+  NotificationTopic:
+    Description: The ARN of the Notification Topic receiving SES Events
+    Value: !Ref NotificationTopic
+
+  EventFirehose:
+    Description: The name of the Kinesis Firehose Delivery Stream for SES Events
+    Value: !Ref EventFirehose
+
+  EventDestinatonBucket:
+    Description: The name of the bucket where firehose events are stored
+    Value: !Ref EventDestinatonBucket
+
+  Table:
+    Description: The name of the events table
+    Value: !Ref Table
+
+  TableStreamArn:
+    Description: Stream ARN for Preferences Table
+    Value: !GetAtt Table.StreamArn

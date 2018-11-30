@@ -1,0 +1,7 @@
+{
+    "StackSetName": "email", 
+    "Description": "Pinpoint & SES Email",
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

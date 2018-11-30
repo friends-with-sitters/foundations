@@ -1,0 +1,184 @@
+Resources:
+
+  PinpointConfigurationSet:
+    DependsOn: PinpointConfigurationSetFunctionLogGroup
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt PinpointConfigurationSetFunction.Arn
+      # AppName: !Ref AppName
+
+  PinpointConfigurationSetFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const aws = require('aws-sdk');
+          const pinpoint = new aws.PinpointEmail({ apiVersion: '2016-12-01', region: 'us-east-1' });
+          exports.handler = function (event, context) {
+            if (event.RequestType == 'Delete') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Update') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Create') {
+              const params = event.ResourceProperties;
+              delete params.ServiceToken;
+              return pinpoint.createConfigurationSet(params).promise()
+                .then(() => {
+                  const { ConfigurationSetName } = params;
+                  const responseData = { ConfigurationSetName };
+                  response.send(event, context, response.SUCCESS, responseData);
+                }).catch((err) => {
+                  console.log(err.stack);
+                  responseData = { Error: err };
+                  response.send(event, context, response.FAILED, responseData);
+                  throw err;
+                });
+            }
+          };
+      Role: !GetAtt PinpointEmailExecutionRole.Arn
+
+  PinpointConfigurationSetFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PinpointConfigurationSetFunction}"
+      RetentionInDays: 1
+
+  PinpointEventDestination:
+    DependsOn: PinpointEventDestinationFunctionLogGroup
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt PinpointEventDestinationFunction.Arn
+      # AppName: !Ref AppName
+
+  PinpointEventDestinationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const aws = require('aws-sdk');
+          const pinpoint = new aws.PinpointEmail({ apiVersion: '2016-12-01', region: 'us-east-1' });
+          exports.handler = function (event, context) {
+            if (event.RequestType == 'Delete') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Update') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Create') {
+              const params = event.ResourceProperties;
+              delete params.ServiceToken;
+              return pinpoint.createConfigurationSetEventDestination(params).promise()
+                .then(() => {
+                  const { ConfigurationSetName } = params;
+                  const responseData = { ConfigurationSetName };
+                  response.send(event, context, response.SUCCESS, responseData);
+                }).catch((err) => {
+                  console.log(err.stack);
+                  responseData = { Error: err };
+                  response.send(event, context, response.FAILED, responseData);
+                  throw err;
+                });
+            }
+          };
+      Role: !GetAtt PinpointEmailExecutionRole.Arn
+
+  PinpointEventDestinationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PinpointEventDestinationFunction}"
+      RetentionInDays: 1
+
+  PinpointEmailIdentity:
+    DependsOn: PinpointEmailIdentityFunctionLogGroup
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt PinpointEmailIdentityFunction.Arn
+      # AppName: !Ref AppName
+
+  PinpointEmailIdentityFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const aws = require('aws-sdk');
+          const pinpoint = new aws.PinpointEmail({ apiVersion: '2016-12-01', region: 'us-east-1' });
+          exports.handler = (event, context) => {
+            if (event.RequestType == 'Delete') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Update') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Create') {
+              const { EmailIdentity } = event.ResourceProperties;
+              return pinpoint.createEmailIdentity({ EmailIdentity }).promise()
+                .then(({ DkimAttributes: { Tokens } }) => {
+                  response.send(event, context, response.SUCCESS, { Tokens });
+                }).catch((err) => {
+                  console.log(err.stack);
+                  response.send(event, context, response.FAILED, { Error: err });
+                  throw err;
+                });
+            }
+          };
+      Role: !GetAtt PinpointEmailExecutionRole.Arn
+
+  PinpointEmailIdentityFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PinpointEmailIdentityFunction}"
+      RetentionInDays: 1
+
+  PinpointEmailExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LoggingPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+        - PolicyName: PinpointPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobileanalytics:*
+                  - mobiletargeting:*
+                  - sms-voice:*
+                Resource: "*"

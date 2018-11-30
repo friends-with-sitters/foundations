@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "[Analytics] Service deployment"
+
+Parameters:
+
+  AppName:
+    Type: String
+    Default: analytics
+    Description: |
+      The name of the pinpoint app to create.
+
+Resources:
+
+  MasterRegion:
+    Type: Custom::GlobalImports
+    Properties:
+      ServiceToken: !ImportValue GlobalImportValue
+      SourceRegion: !ImportValue MasterRegion
+      Exports:
+        - 'AuthenticatedRole'
+        - 'UnauthenticatedRole'
+
+  Pinpoint:
+    DependsOn: PinpointFunctionLogGroup
+    Type: Custom::LambdaCallout
+    Properties:
+      ServiceToken: !GetAtt PinpointFunction.Arn
+      AppName: !Ref AppName
+
+  PinpointFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 300
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const aws = require('aws-sdk');
+          const pinpoint = new aws.Pinpoint({ apiVersion: '2016-12-01', region: 'us-east-1' });
+          exports.handler = function(event, context) {
+            if (event.RequestType == 'Delete') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Update') {
+              response.send(event, context, response.SUCCESS);
+              return;
+            }
+            if (event.RequestType == 'Create') {
+              const AppName = event.ResourceProperties.AppName;
+              let responseData = {};
+              const params = {
+                CreateApplicationRequest: {
+                  Name: AppName
+                }
+              };
+              return pinpoint.createApp(params).promise()
+                .then((res) => {
+                    responseData = res.ApplicationResponse;
+                    response.send(event, context, response.SUCCESS, responseData);
+                }).catch((err) => {
+                    console.log(err.stack);
+                    responseData = {Error: err};
+                    response.send(event, context, response.FAILED, responseData);
+                    throw err;
+                });
+            }
+          };
+      Role: !GetAtt PinpointFunctionExecutionRole.Arn
+
+  PinpointFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PinpointFunction}"
+      RetentionInDays: 1
+
+  PinpointFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LoggingPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+        - PolicyName: PinpointPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobileanalytics:*
+                  - mobiletargeting:*
+                Resource: "*"
+
+  PinpointAuthenticatedUserPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: PinpointPermissions
+      Roles:
+        - !GetAtt MasterRegion.AuthenticatedRole
+        - !GetAtt MasterRegion.UnauthenticatedRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - mobiletargeting:PutEvents
+              - mobiletargeting:UpdateEndpoint
+            Resource:
+              - !Sub "arn:${AWS::Partition}:mobiletargeting:*:${AWS::AccountId}:apps/${Pinpoint.Id}"
+
+Outputs:
+
+  PinpointId:
+    Description: ID of the Pinpoint application
+    Value: !GetAtt Pinpoint.Id
+    Export:
+      Name: PinpointId
