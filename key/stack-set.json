@@ -1,0 +1,13 @@
+{
+    "StackSetName": "key", 
+    "Description": "KMS Encryption Resource",
+    "Parameters": [
+        {
+            "ParameterKey": "AdministrationRoleName",
+            "ParameterValue": "CrossAccountRole"
+        }
+    ],
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

@@ -34,11 +34,17 @@ Resources:
       Exports:
         - 'AuthenticatedRole'
         - 'UnauthenticatedRole'
+        - 'KeyId'
 
   Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt MasterRegion.KeyId
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         RestrictPublicBuckets: true

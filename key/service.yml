@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "Managed KMS Encryption Key service"
+
+Parameters:
+
+  AdministrationRoleName:
+    Type: String
+    Description: |
+      The name of an IAM Role to be granted administrator
+      permissions for the KMS Key.
+
+Resources:
+
+  Key:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: !Ref AWS::StackName
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+
+  KeyAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      Description: "Provides access to the region KMS Key"
+      Path: "/"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource:
+              - !GetAtt Key.Arn
+
+  Alias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/global-key
+      TargetKeyId: !Ref Key
+
+Outputs:
+
+  KeyId:
+    Description: The KMS Key ID
+    Value: !Ref Key
+    Export:
+      Name: KeyId
+
+  KeyArn:
+    Description: The KMS Key Arn
+    Value: !GetAtt Key.Arn
+    Export:
+      Name: KeyArn
+
+  KeyAlias:
+    Description: The KMS CMK Alias
+    Value: !Ref Alias
+    Export:
+      Name: KeyAlias
+
+  KeyAccessPolicy:
+    Description: ARN to the IAM Managed Policy
+    Value: !Ref KeyAccessPolicy
+    Export:
+      Name: KeyAccessPolicy

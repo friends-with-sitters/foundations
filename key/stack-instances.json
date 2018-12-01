@@ -1,0 +1,6 @@
+{
+    "StackSetName": "key",
+    "Regions": [
+        "eu-west-2"
+    ]
+}
