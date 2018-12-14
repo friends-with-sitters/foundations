@@ -1,7 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
 
-Transform: 'AWS::Serverless-2016-10-31'
-
 Description: "[Authentication] Service deployment"
 
 Parameters:
@@ -85,17 +83,15 @@ Resources:
         Enabled: true
 
   ReferralFunction:
-    Type: AWS::Serverless::Function
+    Type: AWS::Lambda::Function
     Properties:
+      Handler: index.handler
+      Role: !GetAtt ReferralFunctionExecutionRole.Arn
+      Timeout: 20
+      Runtime: nodejs6.10
       Environment:
         Variables:
           MESSAGE_TEMPLATE: !Ref ReferralMessage
-      Events:
-        ReferralStream:
-          Type: DynamoDB
-          Properties:
-            Stream: !GetAtt ReferralTable.StreamArn
-            StartingPosition: TRIM_HORIZON
       Code:
         ZipFile: |
           const SNS = require('aws-sdk/clients/sns');
@@ -113,11 +109,54 @@ Resources:
             })).then(data => cb(null, data)).catch(cb);;
           };
 
+  ReferralStream:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 5
+      Enabled: true
+      EventSourceArn: !GetAtt ReferralTable.StreamArn
+      FunctionName: !GetAtt ReferralFunction.Arn
+      StartingPosition: TRIM_HORIZON
+
   ReferralFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${ReferralFunction}"
       RetentionInDays: 1
+
+  ReferralFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: ExecutionPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource:
+                  - !GetAtt ReferralTable.Arn
+                  - !GetAtt ReferralTable.StreamArn
 
   UserPool:
     Type: AWS::Cognito::UserPool
@@ -188,16 +227,12 @@ Resources:
       SourceArn: !GetAtt UserPool.Arn
 
   PreSignUpFunction:
-    Type: AWS::Serverless::Function
+    Type: AWS::Lambda::Function
     Properties:
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ReferralTable
-        - Effect: Allow
-          Action:
-            - mobiletargeting:PhoneNumberValidate
-          Resource:
-            - !Sub "arn:${AWS::Partition}:mobiletargeting:us-east-1:${AWS::AccountId}:phone/number/validate"
+      Timeout: 5
+      Handler: index.handler
+      Role: !GetAtt PreSignUpFunctionExecutionRole.Arn
+      Runtime: nodejs6.10
       Code:
         ZipFile: |
           const { DynamoDB, Pinpoint } = require('aws-sdk');
@@ -241,6 +276,37 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/${PreSignUpFunction}"
       RetentionInDays: 1
+
+  PreSignUpFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: ExecutionPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobiletargeting:PhoneNumberValidate
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:mobiletargeting:us-east-1:${AWS::AccountId}:phone/number/validate"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt ReferralTable.Arn
 
   IdentityPool:
     Type: AWS::Cognito::IdentityPool
