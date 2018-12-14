@@ -46,16 +46,6 @@ Parameters:
     Type: String
     Default: "Your verification code is {####}."
       
-Globals:
-
-  Function:
-    Runtime: nodejs6.10
-    Timeout: 20
-    Handler: index.handler
-    Environment:
-      Variables:
-        REFERRAL_TABLE: !Ref ReferralTable
-
 Resources:
 
   ReferralTable:
