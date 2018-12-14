@@ -1,5 +1,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 
+Transform: 'AWS::Serverless-2016-10-31'
+
 Description: "[Authentication] Service deployment"
 
 Parameters:
@@ -21,6 +23,10 @@ Parameters:
   EmailIdentityArn:
     Type: String
     Description: The ARN of the SES Sending identity for email
+
+  ReferralMessage:
+    Type: String
+    Default: "Your referral code is {####}."
       
   SMSMessage:
     Type: String
@@ -42,12 +48,81 @@ Parameters:
     Type: String
     Default: "Your verification code is {####}."
       
+Globals:
+
+  Function:
+    Runtime: nodejs6.10
+    Timeout: 20
+    Handler: index.handler
+    Environment:
+      Variables:
+        REFERRAL_TABLE: !Ref ReferralTable
+
 Resources:
+
+  ReferralTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: phone_number
+          AttributeType: S
+        - AttributeName: referral_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: referral_code
+          KeyType: HASH
+        - AttributeName: phone_number
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires
+        Enabled: true
+
+  ReferralFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Environment:
+        Variables:
+          MESSAGE_TEMPLATE: !Ref ReferralMessage
+      Events:
+        ReferralStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ReferralTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+      Code:
+        ZipFile: |
+          const SNS = require('aws-sdk/clients/sns');
+          const { MESSAGE_TEMPLATE: template, AWS_REGION: region } = process.env;
+          const sns = new SNS({ region });
+          exports.handler = ({ Records }, ctx, cb) => {
+            Promise.all(Records.map(({ dynamodb: { NewImage }, eventName }) => {
+              if (eventName !== 'INSERT') {
+                return true;
+              }
+              return sns.publish({ 
+                PhoneNumber: NewImage.phone_number, 
+                Message: template.replace('{####}', NewImage.referral_code),
+              }).promise();
+            })).then(data => cb(null, data)).catch(cb);;
+          };
+
+  ReferralFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ReferralFunction}"
+      RetentionInDays: 1
 
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
-      MfaConfiguration: 'ON'
+      MfaConfiguration: 'OPTIONAL'
       Schema:
         - Name: email
           Required: true
@@ -61,6 +136,17 @@ Resources:
         - Name: name
           Required: true
           Mutable: true
+        - Name: custom:purpose
+          Mutable: false
+        - Name: custom:referrer_id
+          Mutable: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: true
+          RequireSymbols: false
       UsernameAttributes:
         - phone_number
       AdminCreateUserConfig:
@@ -85,11 +171,76 @@ Resources:
         SnsCallerArn: !GetAtt SMSRole.Arn
         ExternalId:
           Fn::Base64: !Ref AWS::StackId
+      LambdaConfig:
+        PreSignUp: !GetAtt PreSignUpFunction.Arn
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       UserPoolId: !Ref UserPool 
+
+  UserPoolPreSignUpFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreSignUpFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  PreSignUpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReferralTable
+        - Effect: Allow
+          Action:
+            - mobiletargeting:PhoneNumberValidate
+          Resource:
+            - !Sub "arn:${AWS::Partition}:mobiletargeting:us-east-1:${AWS::AccountId}:phone/number/validate"
+      Code:
+        ZipFile: |
+          const { DynamoDB, Pinpoint } = require('aws-sdk');
+          const { REFERRAL_TABLE: TableName, AWS_REGION: region } = process.env;
+          const dynamo = new DynamoDB.DocumentClient({ service: new DynamoDB({ region }), params: { TableName } });
+          const pinpoint = new Pinpoint({ region: 'us-east-1' });
+          exports.handler = (event, ctx, callback) => {
+            const phoneNumber = event.request.userAttributes.phone_number;
+            const referralCode = event.request.validationData.referral_code;
+            // exit if request is admin creating a user
+            if (event.triggerSource === 'PreSignUp_AdminCreateUser') return callback(null, event);
+            // ensure a referral code is set
+            if (!referralCode) return callback(new Error('Referral code missing from sign up.'));
+            pinpoint.phoneNumberValidate({ NumberValidateRequest: { PhoneNumber: phoneNumber } }).promise()
+              // check the phone number is valid
+              .then(({ NumberValidateResponse: { CleansedPhoneNumberE164, PhoneType } }) => {
+                if (PhoneType !== 'MOBILE') return callback(new Error(`Phone number "${phoneNumber}" is invalid, or not a mobile number.`));
+                return CleansedPhoneNumberE164;
+              })
+              // retrieve the referral code
+              .then(cleansed => dynamo.get({ Key: { phone_number: cleansed, referral_code: referralCode } }).promise())
+              // check a referral code is correct then set principal referrer and verify
+              .then(({ Item: item }) => {
+                if (!item) return callback(new Error(`Referral code "${referralCode}" is invalid.`));
+                event.response = { autoConfirmUser: true, autoVerifyPhone: true };
+                event.request.userAttributes.referrer_id = item.principal_id;
+                return item;
+              })
+              // delete the referral code now its used
+              .then(({ phone_number, referral_code }) => dynamo.delete({ Key: { phone_number, referral_code } }).promise())
+              // return the callback!
+              .then(() => callback(null, event))
+              .catch((err) => {
+                console.error(err);
+                callback(new Error('Internal error. Please try again.'))
+              });
+          };
+
+  PreSignUpFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PreSignUpFunction}"
+      RetentionInDays: 1
 
   IdentityPool:
     Type: AWS::Cognito::IdentityPool
@@ -183,6 +334,14 @@ Outputs:
     Value: !Ref IdentityPool
     Export:
       Name: IdentityPoolId
+
+  ReferralTable:
+    Description: The name of the Referral table
+    Value: !Ref ReferralTable
+
+  ReferralTableStreamArn:
+    Description: Stream ARN for Referral Table
+    Value: !GetAtt ReferralTable.StreamArn
 
   AuthenticatedRole:
     Description: Authenticated IAM Role

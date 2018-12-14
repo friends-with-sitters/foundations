@@ -8,6 +8,6 @@
         }
     ],
     "Capabilities": [
-        "CAPABILITY_IAM"
+        "CAPABILITY_AUTO_EXPAND"
     ]
 }
