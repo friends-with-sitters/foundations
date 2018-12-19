@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: SNS-based event fanout
+Outputs:
+  Fabric:
+    Description: SNS Topic ARN for Fabric
+    Export:
+      Name: Fabric
+    Value:
+      Ref: Fabric
+  FabricPublisherPolicy:
+    Description: IAM Managed Policy ARN for Fabric
+    Export:
+      Name: FabricPublisherPolicy
+    Value:
+      Ref: FabricPublisherPolicy
+Resources:
+  Fabric:
+    Properties:
+      DisplayName: Fabric
+      KmsMasterKeyId:
+        Fn::ImportValue: KeyId
+    Type: AWS::SNS::Topic
+  FabricConsumerPolicy:
+    Properties:
+      PolicyDocument:
+        Id: SubscriberPolicy
+        Statement:
+        - Action: sns:Subscribe
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:aws:iam::${AWS::AccountId}:root
+          Resource: '*'
+          Sid: AllowAccountSubscribers
+        Version: '2012-10-17'
+      Topics:
+      - Ref: Fabric
+    Type: AWS::SNS::TopicPolicy
+  FabricLayer:
+    Properties:
+      CompatibleRuntimes:
+      - nodejs8.10
+      - nodejs6.10
+      Content:
+        S3Bucket: temp-layer-bucket
+        S3Key: 2942ddbdd789123aa26bc55e9f2f5af8
+      Description: Fabric Library as Lambda Layer
+      LayerName: Fabric
+      LicenseInfo: MIT
+    Type: AWS::Lambda::LayerVersion
+  FabricPublisherPolicy:
+    Properties:
+      Description: Provides publish permissions to SNS Fabric
+      Path: /
+      PolicyDocument:
+        Statement:
+        - Action:
+          - sns:Publish
+          Effect: Allow
+          Resource:
+          - Ref: Fabric
+        Version: '2012-10-17'
+    Type: AWS::IAM::ManagedPolicy

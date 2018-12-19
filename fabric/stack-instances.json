@@ -1,0 +1,6 @@
+{
+    "StackSetName": "fabric",
+    "Regions": [
+        "eu-west-2"
+    ]
+}

@@ -1,0 +1,7 @@
+{
+    "StackSetName": "fabric", 
+    "Description": "SNS based events",
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}

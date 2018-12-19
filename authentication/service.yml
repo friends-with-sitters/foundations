@@ -25,6 +25,10 @@ Parameters:
   ReferralMessage:
     Type: String
     Default: "Your referral code is {####}."
+
+  PostConfirmationMessage:
+    Type: String
+    Default: "Welcome {####}, sign up has completed."
       
   SMSMessage:
     Type: String
@@ -58,9 +62,9 @@ Resources:
         - AttributeName: referral_code
           AttributeType: S
       KeySchema:
-        - AttributeName: referral_code
-          KeyType: HASH
         - AttributeName: phone_number
+          KeyType: HASH
+        - AttributeName: referral_code
           KeyType: RANGE
       StreamSpecification:
         StreamViewType: NEW_IMAGE
@@ -153,6 +157,9 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       MfaConfiguration: 'OPTIONAL'
+      AutoVerifiedAttributes:
+        - email
+        - phone_number
       Schema:
         - Name: email
           Required: true
@@ -166,13 +173,13 @@ Resources:
         - Name: name
           Required: true
           Mutable: true
-        - Name: custom:purpose
+        - Name: purpose
           AttributeDataType: String
           Mutable: false
-        - Name: custom:referrer_id
+        - Name: referrer_id
+          DeveloperOnlyAttribute: true
           AttributeDataType: String
           Mutable: false
-          
       Policies:
         PasswordPolicy:
           MinimumLength: 8
@@ -206,17 +213,42 @@ Resources:
           Fn::Base64: !Ref AWS::StackId
       LambdaConfig:
         PreSignUp: !GetAtt PreSignUpFunction.Arn
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       UserPoolId: !Ref UserPool 
+      ReadAttributes:
+        - email
+        - email_verified
+        - phone_number
+        - phone_number_verified
+        - birthdate
+        - name
+        - family_name
+        - updated_at
+      WriteAttributes:
+        - email
+        - phone_number
+        - birthdate
+        - name
+        - family_name
+        - updated_at
 
   UserPoolPreSignUpFunctionPermission:
     Type: AWS::Lambda::Permission
     Properties:
       Action: lambda:InvokeFunction
       FunctionName: !Ref PreSignUpFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  UserPoolPostConfirmationFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PostConfirmationFunction
       Principal: cognito-idp.amazonaws.com
       SourceArn: !GetAtt UserPool.Arn
 
@@ -227,42 +259,49 @@ Resources:
       Handler: index.handler
       Role: !GetAtt PreSignUpFunctionExecutionRole.Arn
       Runtime: nodejs6.10
+      Environment:
+        Variables:
+          REFERRAL_TABLE: !Ref ReferralTable
       Code:
         ZipFile: |
-          const { DynamoDB, Pinpoint } = require('aws-sdk');
+          const { DynamoDB, Pinpoint, CognitoIdentityServiceProvider } = require('aws-sdk');
           const { REFERRAL_TABLE: TableName, AWS_REGION: region } = process.env;
           const dynamo = new DynamoDB.DocumentClient({ service: new DynamoDB({ region }), params: { TableName } });
           const pinpoint = new Pinpoint({ region: 'us-east-1' });
+
           exports.handler = (event, ctx, callback) => {
-            const phoneNumber = event.request.userAttributes.phone_number;
-            const referralCode = event.request.validationData.referral_code;
+            const { userPoolId, request: { userAttributes, validationData } } = event;
+            const { phone_number: phoneNumber } = userAttributes;
+            const { referral_code: referralCode } = validationData;
+
             // exit if request is admin creating a user
             if (event.triggerSource === 'PreSignUp_AdminCreateUser') return callback(null, event);
+            
             // ensure a referral code is set
             if (!referralCode) return callback(new Error('Referral code missing from sign up.'));
-            pinpoint.phoneNumberValidate({ NumberValidateRequest: { PhoneNumber: phoneNumber } }).promise()
-              // check the phone number is valid
-              .then(({ NumberValidateResponse: { CleansedPhoneNumberE164, PhoneType } }) => {
-                if (PhoneType !== 'MOBILE') return callback(new Error(`Phone number "${phoneNumber}" is invalid, or not a mobile number.`));
-                return CleansedPhoneNumberE164;
-              })
-              // retrieve the referral code
-              .then(cleansed => dynamo.get({ Key: { phone_number: cleansed, referral_code: referralCode } }).promise())
-              // check a referral code is correct then set principal referrer and verify
-              .then(({ Item: item }) => {
-                if (!item) return callback(new Error(`Referral code "${referralCode}" is invalid.`));
-                event.response = { autoConfirmUser: true, autoVerifyPhone: true };
-                event.request.userAttributes.referrer_id = item.principal_id;
-                return item;
-              })
-              // delete the referral code now its used
-              .then(({ phone_number, referral_code }) => dynamo.delete({ Key: { phone_number, referral_code } }).promise())
-              // return the callback!
-              .then(() => callback(null, event))
-              .catch((err) => {
-                console.error(err);
-                callback(new Error('Internal error. Please try again.'))
-              });
+
+            // initialise cognito client
+            const cognito = new CognitoIdentityServiceProvider({ region, params: { UserPoolId: userPoolId } });
+
+            const actions = [
+              // check for duplicate users with the same phone number
+              cognito.listUsers({ Filter: `phone_number = \"${phoneNumber}\"` }).promise()
+                .then(({ Users: users }) => {
+                  if (users.length > 0) throw new Error(`Phone number "${phoneNumber}" is already registered.`);
+                }),
+              // ensure the number is valid and registered to a valid mobile
+              pinpoint.phoneNumberValidate({ NumberValidateRequest: { PhoneNumber: phoneNumber } }).promise()
+                .then(({ NumberValidateResponse: { PhoneType } }) => {
+                  if (PhoneType !== 'MOBILE') throw new Error(`Phone number "${phoneNumber}" is invalid, or not a mobile number.`);
+                }),
+              // check that the referral code is valid
+              dynamo.get({ Key: { phone_number: phoneNumber, referral_code: referralCode } }).promise()
+                .then(({ Item: item }) => {
+                  if (!item) throw new Error(`Referral code "${referralCode}" is invalid.`);
+                }),
+            ];
+
+            Promise.all(actions).then(() => callback(null, event)).catch(callback);
           };
 
   PreSignUpFunctionLogGroup:
@@ -292,13 +331,100 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - cognito-idp:ListUsers
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
                   - mobiletargeting:PhoneNumberValidate
                 Resource:
                   - !Sub "arn:${AWS::Partition}:mobiletargeting:us-east-1:${AWS::AccountId}:phone/number/validate"
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
-                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt ReferralTable.Arn
+
+  PostConfirmationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Timeout: 5
+      Handler: index.handler
+      Role: !GetAtt PostConfirmationFunctionExecutionRole.Arn
+      Runtime: nodejs6.10
+      Environment:
+        Variables:
+          REFERRAL_TABLE: !Ref ReferralTable
+          MESSAGE_TEMPLATE: !Ref PostConfirmationMessage
+      Code:
+        ZipFile: |
+          const { DynamoDB, SNS, CognitoIdentityServiceProvider } = require('aws-sdk');
+          const { REFERRAL_TABLE: TableName, MESSAGE_TEMPLATE: template, AWS_REGION: region } = process.env;
+          const dynamo = new DynamoDB.DocumentClient({ service: new DynamoDB({ region }), params: { TableName } });
+          const sns = new SNS({ region: 'eu-west-1' });
+
+          const KeyConditionExpression = 'phone_number = :pn and referral_code > :rc';
+
+          exports.handler = ({ userPoolId, userName, triggerSource, request }, ctx, callback) => {
+            const { userAttributes: { phone_number: PhoneNumber, name } } = request;
+
+            // exit if this is not a sign up trigger
+            if (triggerSource !== 'PostConfirmation_ConfirmSignUp') return callback(null, event);
+
+            // initialise cognito client
+            const cognito = new CognitoIdentityServiceProvider({ region, params: { Username: userName, UserPoolId: userPoolId } });
+
+            const actions = [
+              // send a short welcome message to the user
+              sns.publish({ PhoneNumber, Message: template.replace('{####}', name) }).promise(),
+              // set the referrer id for the user
+              dynamo.query({ KeyConditionExpression, ExpressionAttributeValues: { ':pn': PhoneNumber, ':rc': '0' } }).promise()
+                .then(({ Items: [item] }) => cognito.adminUpdateUserAttributes({
+                  UserAttributes: [{ Name: 'dev:custom:referrer_id', Value: item.principal_id }],
+                }).promise()),
+            ];
+
+            Promise.all(actions).then(() => callback(null, event)).catch(callback);
+          };
+
+  PostConfirmationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PostConfirmationFunction}"
+      RetentionInDays: 1
+
+  PostConfirmationFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: ExecutionPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminUpdateUserAttributes
+                Resource:
+                  - "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
                 Resource:
                   - !GetAtt ReferralTable.Arn
 
