@@ -1,15 +1,26 @@
 const SNS = require('aws-sdk/clients/sns');
-const { MESSAGE_TEMPLATE: template } = process.env;
-const sns = new SNS({ region: 'eu-west-1' });
+const fabric = require('@friendswithsitters/fabric');
+const { EVENT: event, MESSAGE_TEMPLATE: template, AWS_REGION: region } = process.env;
+const sns = new SNS({ region });
 
 exports.handler = ({ Records }, ctx, cb) => {
   Promise.all(Records.map(({ dynamodb: { NewImage }, eventName }) => {
-    if (eventName !== 'INSERT') {
-      return true;
-    }
-    return sns.publish({ 
-      PhoneNumber: NewImage.phone_number.S, 
-      Message: template.replace('{####}', NewImage.referral_code.S),
-    }).promise();
+    if (eventName !== 'INSERT') return true;
+    return sns.publish(fabric(event, {
+      MessageRequest: {
+        Addresses: {
+          [NewImage.phone_number.S]: {
+            ChannelType: 'SMS',
+          }
+        },
+        MessageConfiguration: {
+          SMSMessage: {
+            Body: template.replace('{####}', NewImage.referral_code.S),
+            MessageType: 'TRANSACTIONAL',
+            SenderId: 'Sitters',
+          },
+        },
+      },
+    })).promise();
   })).then(data => cb(null, data)).catch(cb);;
 };
