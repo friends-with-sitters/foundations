@@ -20,6 +20,7 @@ Resources:
       Exports:
         - 'AuthenticatedRole'
         - 'UnauthenticatedRole'
+        - 'Fabric'
 
   Pinpoint:
     DependsOn: PinpointFunctionLogGroup
@@ -125,6 +126,86 @@ Resources:
               - mobiletargeting:UpdateEndpoint
             Resource:
               - !Sub "arn:${AWS::Partition}:mobiletargeting:*:${AWS::AccountId}:apps/${Pinpoint.Id}"
+
+  SendMessagesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs6.10
+      Timeout: 20
+      Environment:
+        Variables:
+          APPLICATION_ID: !GetAtt Pinpoint.Id
+      Code:
+        ZipFile: |
+          const Pinpoint = require('aws-sdk/clients/pinpoint');
+          const { APPLICATION_ID: ApplicationId, AWS_REGION: region } = process.env;
+          const pinpoint = new Pinpoint({ region, params: { ApplicationId } });
+          exports.handler = ({ Records }, ctx, cb) => {
+            Promise.all(Records.map(({ Sns: { Message } }) => (
+              pinpoint.sendMessages(JSON.parse(Message)).promise()
+            ))).then(data => cb(null, data)).catch(cb);
+          };
+      Role: !GetAtt SendMessagesFunctionExecutionRole.Arn
+
+  SendMessagesFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SendMessagesFunction}"
+      RetentionInDays: 1
+
+  SendMessagesFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LoggingPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+        - PolicyName: PinpointPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - mobiletargeting:SendMessages
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${Pinpoint.Id}/messages"
+
+  FabricSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Region: !ImportValue MasterRegion
+      TopicArn: !GetAtt MasterRegion.Fabric
+      Protocol: lambda
+      Endpoint: !GetAtt SendMessagesFunction.Arn
+      FilterPolicy: !Sub |
+        {
+          "detail": ["sendMessages"]
+        }
+
+  FabricInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: !Sub "sns.${AWS::URLSuffix}"
+      SourceArn: !GetAtt MasterRegion.Fabric
+      FunctionName: !GetAtt SendMessagesFunction.Arn
 
 Outputs:
 
