@@ -59,6 +59,12 @@ Outputs:
     Export:
       Name: Fabric
 
+  FabricLayer:
+    Description: ARN for the Fabric Lambda Layer
+    Value: !Ref FabricLayer
+    Export:
+      Name: FabricLayer
+
   FabricPublisherPolicy:
     Description: IAM Managed Policy ARN for Fabric
     Value: !Ref FabricPublisherPolicy
