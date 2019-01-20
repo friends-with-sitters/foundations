@@ -5,7 +5,8 @@ const sns = new SNS({ region: 'eu-west-1' });
 
 const KeyConditionExpression = 'phone_number = :pn and referral_code > :rc';
 
-exports.handler = ({ userPoolId, userName, triggerSource, request }, ctx, callback) => {
+exports.handler = (event, ctx, callback) => {
+  const { userPoolId, userName, triggerSource, request } = event;
   const { userAttributes: { phone_number: PhoneNumber, name } } = request;
 
   // exit if this is not a sign up trigger

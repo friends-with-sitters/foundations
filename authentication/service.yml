@@ -192,9 +192,10 @@ Resources:
           AttributeDataType: String
           Mutable: false
         - Name: referrer_id
+          Required: false
+          Mutable: true
           DeveloperOnlyAttribute: true
           AttributeDataType: String
-          Mutable: false
       Policies:
         PasswordPolicy:
           MinimumLength: 8
@@ -243,6 +244,7 @@ Resources:
         - name
         - family_name
         - updated_at
+        - custom:purpose
       WriteAttributes:
         - email
         - phone_number
@@ -250,6 +252,7 @@ Resources:
         - name
         - family_name
         - updated_at
+        - custom:purpose
 
   UserPoolPreSignUpFunctionPermission:
     Type: AWS::Lambda::Permission
@@ -380,7 +383,8 @@ Resources:
 
           const KeyConditionExpression = 'phone_number = :pn and referral_code > :rc';
 
-          exports.handler = ({ userPoolId, userName, triggerSource, request }, ctx, callback) => {
+          exports.handler = (event, ctx, callback) => {
+            const { userPoolId, userName, triggerSource, request } = event;
             const { userAttributes: { phone_number: PhoneNumber, name } } = request;
 
             // exit if this is not a sign up trigger
