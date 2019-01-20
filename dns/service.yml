@@ -213,32 +213,6 @@ Resources:
                 Resource:
                   - "*"
 
-  ApiDomainName:
-    Type: AWS::ApiGateway::DomainName
-    Properties:
-      DomainName: !Sub "api.${DomainName}"
-      RegionalCertificateArn: !Ref DomainCertificate
-      EndpointConfiguration:
-        Types:
-          - REGIONAL
-
-  ApiDomainRecord:
-    Type: AWS::Route53::RecordSetGroup
-    Properties:
-      HostedZoneId: !If 
-        - IsMasterRegion
-        - !Ref Zone
-        - !GetAtt MasterRegionImports.DomainId
-      RecordSets:
-        - SetIdentifier: !Sub "A@${AWS::Region}@api.${DomainName}"
-          Name: !Sub "api.${DomainName}"
-          Region: !Ref AWS::Region
-          Type: A
-          AliasTarget:
-            EvaluateTargetHealth: true
-            HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
-            DNSName: !GetAtt ApiDomainName.RegionalDomainName
-
 Outputs:
 
   DomainName:
