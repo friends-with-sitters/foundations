@@ -1,7 +1,0 @@
-{
-    "StackSetName": "api", 
-    "Description": "API Gateway Regional Domain Setup",
-    "Capabilities": [
-        "CAPABILITY_IAM"
-    ]
-}
