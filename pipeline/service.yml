@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: "CodePipeline Setup & Configuration"
+
+Parameters:
+
+  GitHubUsername:
+    Type: String
+    NoEcho: true
+    Description: |
+      The username of the GitHub user to connect with.
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: |
+      The personal access token used to connect to GitHub with.
+
+  MasterRegion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: "/Global/MasterRegion"
+    Description: |
+      Retrieves the MasterRegion from the AWS SSM Parameter Store
+
+Conditions:
+
+  IsMasterRegion: !Equals [ !Ref "AWS::Region", !Ref "MasterRegion" ]
+
+Resources:
+
+  Secret:
+    Condition: IsMasterRegion
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: |
+        GitHub connection information for CI/CD processes
+      KmsKeyId: !Ref Key
+      SecretString: !Sub |
+        {
+          "username": "${GitHubUsername}",
+          "token": "${GitHubToken}"
+        }
+
+  Key:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Id: !Ref AWS::StackName
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+
+  Alias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/codepipeline
+      TargetKeyId: !Ref Key
+
+  Artifacts:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      AccessControl: AuthenticatedRead
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref Key
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            NoncurrentVersionTransitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 60
+            NoncurrentVersionExpirationInDays: 120
+          - Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 60
+              - StorageClass: GLACIER
+                TransitionInDays: 120
+            ExpirationInDays: 240
+
+  ArtifactsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Artifacts
+      PolicyDocument:
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${Artifacts.Arn}/*"
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: !Sub "${Artifacts.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+            Action:
+              - "s3:*"
+            Resource: 
+              - !GetAtt Artifacts.Arn
+              - !Sub "${Artifacts.Arn}/*"
+          # - Effect: Allow
+          #   Principal:
+          #     AWS:
+          #       - !Sub "arn:aws:iam::${AWS::AccountId}:root" 
+          #   Action:
+          #     - "s3:*"
+          #   Resource: 
+          #     - !GetAtt Artifacts.Arn
+          #     - !Sub "${Artifacts.Arn}/*"
+
+  CodePipelineExecutionRole:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - !Ref CodePipelineExecutionPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Ref AWS::AccountId
+            Action:
+              - sts:AssumeRole
+
+  CodePipelineExecutionRolePolicy:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodePipelineExecutionPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Resource:
+              - !GetAtt CloudFormationExecutionRole.Arn
+          - Action:
+              - codebuild:BatchGet*
+              - codebuild:ListBuilds*
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource: 
+              - "*"
+          - Action:
+              - lambda:*
+              - cloudformation:*
+              - s3:*
+              - iam:PassRole
+            Effect: Allow
+            Resource: 
+              - "*"
+      Roles:
+        - !Ref CodePipelineExecutionRole
+
+  CodePipelineExecutionPolicy: 
+    Condition: IsMasterRegion
+    Type: AWS::IAM::ManagedPolicy
+    Properties: 
+      Description: "Policy for assuming account resources"
+      Path: "/"
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Action:
+              - kms:*
+            Effect: Allow
+            Resource:
+              - '*'
+          - Action:
+              - s3:*
+            Effect: Allow
+            Resource:
+              - !GetAtt Artifacts.Arn
+              - !Sub "${Artifacts.Arn}/*"
+
+  CloudFormationExecutionRole:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  CloudFormationExecutionRolePolicy:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CloudFormationExecutionPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - apigateway:*
+              - application-autoscaling:*
+              - cloudformation:*
+              - cloudfront:*
+              - cloudwatch:*
+              - codebuild:*
+              - codepipeline:*
+              - cognito-idp:*
+              - cognito-identity:*
+              - dynamodb:*
+              - events:*
+              - batch:*
+              - iam:*
+              - lambda:*
+              - logs:*
+              - kms:*
+              - rds:*
+              - route53:*
+              - s3:*
+              - sns:*
+              - ssm:*
+              - ec2:*
+              - ecs:*
+              - ecr:*
+              - elasticloadbalancing:*
+              - autoscaling:*
+              - waf:*
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Effect: Allow
+            Resource:
+              - !GetAtt Artifacts.Arn
+              - !Sub "${Artifacts.Arn}/*"
+          - Action:
+              - secretsmanager:GetSecretValue
+            Effect: Allow
+            Resource:
+              - !Ref Secret
+      Roles:
+        - !Ref CloudFormationExecutionRole
+
+  CodeBuildExecutionRole:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: !Sub "codebuild.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      Path: /
+
+  CodeBuildExecutionRolePolicy:
+    Condition: IsMasterRegion
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeBuildArtifactAccess
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource:
+              - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+          - Effect: Allow
+            Action:
+              - kms:*
+            Resource:
+              - !GetAtt Key.Arn
+          - Action:
+              - 's3:*'
+            Effect: Allow
+            Resource:
+              - "*"
+          - Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Effect: Allow
+            Resource: '*'
+      Roles:
+        - !Ref CodeBuildExecutionRole
+
+Outputs:
+
+  Secret:
+    Condition: IsMasterRegion
+    Description: The GitHub connection information
+    Value: !Ref Secret
+    Export:
+      Name: GitHubSecret
+
+  Key:
+    Description: KMS Encryption key for CodePipeline
+    Value: !Ref Key
+    Export:
+      Name: Key
+
+  Artifacts:
+    Description: Artifact bucket name
+    Value: !Ref Artifacts
+    Export:
+      Name: Artifacts
+
+  CodePipelineExecutionRole:
+    Condition: IsMasterRegion
+    Description: Execution role for CodePipeline
+    Value: !GetAtt CodePipelineExecutionRole.Arn
+    Export:
+      Name: CodePipelineExecutionRole
+
+  CloudFormationExecutionRole:
+    Condition: IsMasterRegion
+    Description: Execution role for CloudFormation via CodePipeline
+    Value: !GetAtt CloudFormationExecutionRole.Arn
+    Export:
+      Name: CloudFormationExecutionRole
+
+  CodeBuildExecutionRole:
+    Condition: IsMasterRegion
+    Description: Execution role for CodeBuild via CodePipeline
+    Value: !GetAtt CodeBuildExecutionRole.Arn
+    Export:
+      Name: CodeBuildExecutionRole

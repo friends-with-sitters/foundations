@@ -1,0 +1,7 @@
+{
+    "StackSetName": "pipeline",
+    "Description": "CodePipeline Setup & Configuration",
+    "Capabilities": [
+        "CAPABILITY_IAM"
+    ]
+}
