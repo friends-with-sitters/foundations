@@ -527,6 +527,12 @@ Outputs:
     Value: !Ref UserPool
     Export:
       Name: UserPoolId
+
+  UserPoolArn:
+    Description: User Pool Arn
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: UserPoolArn
   
   UserPoolClient:
     Description: User Pool Client ID
